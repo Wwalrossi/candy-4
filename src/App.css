@@ -1,0 +1,30 @@
+.tile {
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  color: rgb(7, 145, 30);
+  font-weight: bold;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgb(41, 149, 221);
+  transition: transform 2s ease, opacity 2s ease;
+  will-change: transform, opacity;
+}
+.tile.removing {
+  opacity: 0;
+  transform: scale(1);
+  pointer-events: none;}
+  .tile.selected {
+  outline: 2px solid red;
+  transform: scale(1.1);
+}
+#board {
+  position: relative;
+  width: 320px; /* 8 тайлов по 40px, как пример */
+  height: 320px;
+  margin: 20px auto;
+  background-color: #eee;
+}
