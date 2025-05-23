@@ -3,28 +3,40 @@
   width: 40px;
   height: 40px;
   border-radius: 8px;
-  color: rgb(7, 145, 30);
+  color: rgb(0, 0, 0);
   font-weight: bold;
   font-size: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: rgb(41, 149, 221);
+  background-color: rgb(0, 0, 0);
   transition: transform 2s ease, opacity 2s ease;
   will-change: transform, opacity;
 }
-.tile.removing {
-  opacity: 0;
-  transform: scale(1);
-  pointer-events: none;}
+.tile.bonus {
+  background-color: rgb(2, 0, 0) !important;
+  color: black;
+}
+
   .tile.selected {
   outline: 2px solid red;
-  transform: scale(1.1);
+  transform: scale(1.5);
 }
-#board {
+#board {       /*доска*/
   position: relative;
   width: 320px; /* 8 тайлов по 40px, как пример */
   height: 320px;
   margin: 20px auto;
-  background-color: #eee;
+  background-color: hsl(113, 52%, 44%);
+}
+.tile.removing {
+  opacity: 0;
+  transform: scale(2); /* уменьшается при удалении */
+  pointer-events: none;
+  transition: opacity 2s ease, transform 2s ease;
+  will-change: opacity, transform;
+}
+/* Тайлы при падении (осыпании вниз) */
+.tile.falling {
+  transition: transform 1s ease-in;
 }

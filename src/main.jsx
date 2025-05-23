@@ -7,7 +7,7 @@ let selected = null;
 
 const COLORS = {
   1: "#FF6B6B",
-  2: "#4ECDC4",
+  2: "#9932CC",
   3: "#FFD93D",
   4: "#A29BFE",
   5: "#00B894",
@@ -24,7 +24,7 @@ function startGame() {
 }
 
 function updateScore() {
-  document.getElementById("score").textContent = "Очки: " + currentScore;
+  document.getElementById("score").textContent = "Ебалы:: " + currentScore;
 }
 
 // Отрисовка доски — используем абсолютные тайлы
@@ -57,7 +57,47 @@ function renderBoard(board, animate = false) {
         tileDiv.classList.add("selected");
       }
 
-      tileDiv.onclick = () => handleTileClick(x, y);
+      if (tile === 100) {
+  tileDiv.style.backgroundColor = "#000000"; // Цвет бонусного тайла
+  tileDiv.textContent = "★";
+  tileDiv.onclick = () => handleBonusTileClick(x, y);
+} else {
+  tileDiv.onclick = () => handleTileClick(x, y);
+}
+function handleBonusTileClick(x, y) {
+  invoke("activate_bonus_tile", {
+    x,
+    y,
+    board: currentBoard,
+    score: currentScore,
+  }).then((result) => {
+    const removingTiles = [];
+    for (let y = 0; y < currentBoard.length; y++) {
+      for (let x = 0; x < currentBoard[y].length; x++) {
+        if (currentBoard[y][x] !== 0 && result.board[y][x] === 0) {
+          removingTiles.push({ x, y });
+        }
+      }
+    }
+
+    animateRemovingTiles(removingTiles, () => {
+      const oldBoard = currentBoard.map(row => [...row]);
+      currentBoard = result.board;
+      currentScore = result.score;
+
+     
+      requestAnimationFrame(() => {
+        animateFallingTiles(oldBoard, currentBoard, () => {
+          renderBoard(currentBoard, true);
+          updateScore();
+        });
+      });
+    });
+  }).catch((err) => {
+    console.error("Bonus activation error:", err);
+  });
+}
+
 
       // Анимация появления новых тайлов
       if (animate && tile !== 0) {
@@ -83,6 +123,9 @@ function animateRemovingTiles(removingTiles, onComplete) {
     const tile = boardElement.querySelector(`.tile[data-x="${x}"][data-y="${y}"]`);
     if (tile) {
       tile.classList.add("removing");
+      setTimeout(() => {
+  tile.remove(); // Удалить из DOM
+}, 300); 
       tile.addEventListener("animationend", () => {
         completed++;
         if (completed === removingTiles.length) {
@@ -99,8 +142,9 @@ function animateRemovingTiles(removingTiles, onComplete) {
 
 // Анимация падения тайлов после удаления
 function animateFallingTiles(oldBoard, newBoard, onComplete) {
+  console.log("🟡 animateFallingTiles: step-by-step animation start");
   const boardElement = document.getElementById("board");
-  const tileSize = 40 + 4;
+  const tileSize = 44; // 40 + 4
   const moves = [];
 
   for (let y = 0; y < oldBoard.length; y++) {
@@ -110,35 +154,52 @@ function animateFallingTiles(oldBoard, newBoard, onComplete) {
 
       for (let ny = y + 1; ny < newBoard.length; ny++) {
         if (newBoard[ny][x] === oldVal && oldBoard[ny][x] === 0) {
-          moves.push({ x, y, toY: ny, value: oldVal });
+          moves.push({ x, fromY: y, toY: ny, value: oldVal });
           break;
         }
       }
     }
   }
 
-  let completed = 0;
-
-  moves.forEach(({ x, y, toY }) => {
-    const tile = boardElement.querySelector(`.tile[data-x="${x}"][data-y="${y}"]`);
-    if (!tile) return;
-
-    // Анимация transform
-    tile.style.transition = 'transform 0.3s ease';
-    tile.style.transform = `translate(${x * tileSize}px, ${toY * tileSize}px)`;
-
-    tile.addEventListener("transitionend", () => {
-      completed++;
-      if (completed === moves.length) {
-        onComplete();
-      }
-    }, { once: true });
-  });
-
   if (moves.length === 0) {
     onComplete();
+    return;
   }
+
+  let completed = 0;
+
+  moves.forEach(({ x, fromY, toY }) => {
+    const tile = boardElement.querySelector(`.tile[data-x="${x}"][data-y="${fromY}"]`);
+    if (!tile) {
+      completed++;
+      if (completed === moves.length) onComplete();
+      return;
+    }
+
+    const steps = [];
+    for (let y = fromY + 1; y <= toY; y++) {
+      steps.push(y);
+    }
+
+  function animateStep(index) {
+  if (index >= steps.length) {
+    tile.dataset.y = toY;
+    tile.classList.remove("falling");
+    completed++;
+    if (completed === moves.length) onComplete();
+    return;
+  }
+
+  const newY = steps[index];
+  tile.classList.add("falling"); // 👈 включаем анимацию
+  tile.style.transform = `translate(${x * tileSize}px, ${newY * tileSize}px)`;
+
+  setTimeout(() => animateStep(index + 1), 100); // увеличил для лучшей видимости
 }
+    animateStep(0);
+  });
+}
+
 
 // Анимация перемещения двух соседних тайлов при клике
 function animateTileSwap(x1, y1, x2, y2, callback) {

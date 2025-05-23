@@ -1,0 +1,397 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+// Импорт генератора случайных чисел из библиотеки rand
+use rand::Rng;
+// Импорт сериализации структур в JSON (нужно для Tauri и передачи данных в JS)
+use serde::Serialize;
+// Импорт макроса #[command] из Tauri (используется для экспорта функций в JS)
+use tauri::command;
+// Импорт HashSet — нужен для хранения уникальных координат совпадений
+use std::collections::HashSet;
+
+// Размеры игрового поля
+const WIDTH: usize = 9;
+const HEIGHT: usize = 9;
+// Количество различных типов тайлов (например, 5 разных цветов)
+const TILE_TYPES: usize = 5;
+const BONUS_TILE: u8 = 100; // Тип бонусного тайла
+// Тип игрового поля: 2D массив значений тайлов
+type Board = [[u8; WIDTH]; HEIGHT];
+
+/// Структура для информации об анимированном падении тайлов
+#[derive(Serialize, Clone)]
+struct DropInfo {
+    from_x: usize,
+    from_y: usize,
+    to_x: usize,
+    to_y: usize,
+    value: u8,
+}
+
+/// Основное состояние игры, которое отправляется в JS
+#[derive(Serialize, Clone)]
+struct GameState {
+    board: Board,
+    score: u32,
+    drops: Vec<DropInfo>,
+}
+
+/// Команда generate_board, вызывается из JS для создания начального поля
+#[command]
+fn generate_board() -> GameState {
+    let mut rng = rand::thread_rng(); // генератор случайных чисел
+    let mut board = [[0; WIDTH]; HEIGHT]; // инициализация поля нулями
+
+    // Заполнение поля случайными тайлами без начальных совпадений
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            loop {
+                let tile = rng.gen_range(1..=TILE_TYPES) as u8;
+                // Проверка на горизонтальные совпадения
+                if x >= 2 && board[y][x - 1] == tile && board[y][x - 2] == tile {
+                    continue;
+                }
+                // Проверка на вертикальные совпадения
+                if y >= 2 && board[y - 1][x] == tile && board[y - 2][x] == tile {
+                    continue;
+                }
+                // Если всё ок — сохраняем тайл
+                board[y][x] = tile;
+                break;
+            }
+        }
+    }
+    GameState { // Возвращаем игровое состояние
+        board,
+        score: 0,
+        drops: vec![],
+    }
+}
+
+/// Команда move_tile вызывается из JS при попытке сдвинуть 2 соседних тайла
+#[command]
+fn move_tile(
+    x1: usize, y1: usize,
+    x2: usize, y2: usize,
+    mut board: Board,
+    score: u32,
+) -> GameState {
+    if !are_adjacent(x1, y1, x2, y2) {
+        return GameState { board, score, drops: vec![] };
+    }
+    // Обмен местами
+    board[y1][x1] ^= board[y2][x2];
+    board[y2][x2] ^= board[y1][x1];
+    board[y1][x1] ^= board[y2][x2];
+
+    let mut total_score = score;
+    let mut had_matches = false;
+    let mut total_drops = vec![];
+
+    loop {
+        let matches = find_matches(&board);
+        if matches.is_empty() {
+            break;
+        }
+
+        had_matches = true;
+
+        let matched_count = matches.len();
+        if matched_count >= 3 {
+            total_score += 3 + (matched_count as u32 - 3);
+        }
+
+        // Если совпало >=5 — создаём бонусный тайл
+        if matched_count >= 5 {
+            // Центр совпадений — берем первый элемент
+            if let Some(&(bx, by)) = matches.iter().next() {
+                board[by][bx] = BONUS_TILE;
+            }
+        }
+
+        // Удаляем совпадения
+        for &(x, y) in &matches {
+            // Не затираем бонусный тайл, если только он не был в совпадении
+            if board[y][x] != BONUS_TILE {
+                board[y][x] = 0;
+            }
+        }
+
+        let drops = drop_tiles_with_info(&mut board);
+        total_drops.extend(drops);
+    }
+
+    if !had_matches {
+        // Откат
+        board[y1][x1] ^= board[y2][x2];
+        board[y2][x2] ^= board[y1][x1];
+        board[y1][x1] ^= board[y2][x2];
+        return GameState { board, score, drops: vec![] };
+    }
+
+    GameState {
+        board,
+        score: total_score,
+        drops: total_drops,
+    }
+}
+
+#[tauri::command]// Главная функция: активация бонусного тайла
+fn activate_bonus_tile(x: usize, y: usize, mut board: Board, score: u32) -> GameState {
+    // Проверяем, что нажатый тайл действительно является бонусом
+    if board[y][x] != BONUS_TILE {
+        // Если нет — возвращаем текущее состояние без изменений
+        return GameState { board, score, drops: vec![] };
+    }
+
+    // Удаляем сам бонусный тайл с поля (обнуляем клетку)
+    board[y][x] = 0;
+
+    // Начинаем с текущего количества очков
+    let mut total_score = score;
+
+    // Множество всех координат, которые нужно удалить (чтобы не было повторов)
+    let mut positions_to_clear = HashSet::new();
+
+    // Добавляем в множество все клетки текущей строки
+    for i in 0..WIDTH {
+        positions_to_clear.insert((i, y));
+    }
+
+    // Добавляем в множество все клетки текущего столбца
+    for j in 0..HEIGHT {
+        positions_to_clear.insert((x, j));
+    }
+
+    // Удаляем (обнуляем) все тайлы, которые были добавлены в множество
+    for &(cx, cy) in &positions_to_clear {
+        board[cy][cx] = 0;
+    }
+
+    // За каждый удалённый тайл начисляем по 1 очку
+    total_score += positions_to_clear.len() as u32;
+
+    // Применяем осыпание тайлов и получаем информацию о падениях
+    let mut drops = drop_tiles_with_info(&mut board);
+
+    loop {
+        let matches = find_matches(&board);
+        if matches.is_empty() {
+            break;
+        }
+
+        // Преобразуем в HashSet для удобства
+        let mut match_set: HashSet<(usize, usize)> = matches.iter().cloned().collect();
+
+        let matched_count = match_set.len();
+        if matched_count >= 3 {
+            total_score += 3 + (matched_count as u32 - 3);
+        }
+
+        // Проверка: есть ли длинная прямая линия (5+ тайлов)
+        let longest_line = find_longest_line(&board, &match_set);
+        if longest_line >= 5 {
+            // Найдём координаты линии и вставим бонус в её центре
+            if let Some((bx, by)) = find_bonus_position_in_line(&match_set) {
+                board[by][bx] = BONUS_TILE;
+                match_set.remove(&(bx, by)); // Не удаляем этот бонус повторно
+            }
+        }
+
+        // Удаляем совпадения
+        for &(x, y) in &match_set {
+            if board[y][x] != BONUS_TILE {
+                board[y][x] = 0;
+            }
+        }
+
+        let new_drops = drop_tiles_with_info(&mut board);
+        drops.extend(new_drops);
+    }
+
+    // Возвращаем новое состояние игры: обновленное поле, очки и падения
+    GameState {
+        board,
+        score: total_score,
+        drops,
+    }
+}
+
+// Находит длину самой длинной прямой линии (горизонтальной или вертикальной)
+fn find_longest_line(_board: &Board, matches: &HashSet<(usize, usize)>) -> usize {
+    let mut max_line = 0;
+
+    for &(x, y) in matches {
+        // Проверка по горизонтали
+        let mut len = 1;
+        let mut i = x + 1;
+        while i < WIDTH && matches.contains(&(i, y)) {
+            len += 1;
+            i += 1;
+        }
+        let mut i = x as isize - 1;
+        while i >= 0 && matches.contains(&(i as usize, y)) {
+            len += 1;
+            i -= 1;
+        }
+        max_line = max_line.max(len);
+
+        // Проверка по вертикали
+        let mut len = 1;
+        let mut j = y + 1;
+        while j < HEIGHT && matches.contains(&(x, j)) {
+            len += 1;
+            j += 1;
+        }
+        let mut j = y as isize - 1;
+        while j >= 0 && matches.contains(&(x, j as usize)) {
+            len += 1;
+            j -= 1;
+        }
+        max_line = max_line.max(len);
+    }
+
+    max_line
+}
+
+// Ищет координаты центра самой длинной линии (приоритет горизонтали)
+fn find_bonus_position_in_line(matches: &HashSet<(usize, usize)>) -> Option<(usize, usize)> {
+    // Сначала проверим горизонтали
+    for y in 0..HEIGHT {
+        let mut line: Vec<(usize, usize)> = (0..WIDTH)
+            .filter(|&x| matches.contains(&(x, y)))
+            .map(|x| (x, y))
+            .collect();
+
+        if line.len() >= 5 {
+            line.sort_by_key(|&(x, _)| x);
+            return Some(line[line.len() / 2]);
+        }
+    }
+
+    // Затем проверим вертикали
+    for x in 0..WIDTH {
+        let mut line: Vec<(usize, usize)> = (0..HEIGHT)
+            .filter(|&y| matches.contains(&(x, y)))
+            .map(|y| (x, y))
+            .collect();
+
+        if line.len() >= 5 {
+            line.sort_by_key(|&(_, y)| y);
+            return Some(line[line.len() / 2]);
+        }
+    }
+
+    None
+}
+
+
+
+/// Проверка, являются ли клетки соседними
+fn are_adjacent(x1: usize, y1: usize, x2: usize, y2: usize) -> bool {
+    (x1 == x2 && (y1 as isize - y2 as isize).abs() == 1)
+        || (y1 == y2 && (x1 as isize - x2 as isize).abs() == 1)
+}
+
+/// Поиск всех совпадений из 3+ одинаковых тайлов на поле
+fn find_matches(board: &Board) -> Vec<(usize, usize)> {
+    let mut matches = HashSet::new();
+
+    // Горизонтальные совпадения
+    for y in 0..HEIGHT {
+        let mut count = 1;
+        for x in 1..WIDTH {
+            if board[y][x] != 0 && board[y][x] == board[y][x - 1] {
+                count += 1;
+            } else {
+                if count >= 3 {
+                    for k in 0..count {
+                        matches.insert((x - 1 - k, y));
+                    }
+                }
+                count = 1;
+            }
+        }
+        // Проверка в конце строки
+        if count >= 3 {
+            for k in 0..count {
+                matches.insert((WIDTH - 1 - k, y));
+            }
+        }
+    }
+
+    // Вертикальные совпадения
+    for x in 0..WIDTH {
+        let mut count = 1;
+        for y in 1..HEIGHT {
+            if board[y][x] != 0 && board[y][x] == board[y - 1][x] {
+                count += 1;
+            } else {
+                if count >= 3 {
+                    for k in 0..count {
+                        matches.insert((x, y - 1 - k));
+                    }
+                }
+                count = 1;
+            }
+        }
+        // Проверка в конце колонки
+        if count >= 3 {
+            for k in 0..count {
+                matches.insert((x, HEIGHT - 1 - k));
+            }
+        }
+    }
+
+    // Возвращаем вектор уникальных координат совпадений
+    matches.into_iter().collect()
+}
+
+/// Осыпание тайлов и генерация новых, с записью информации о движении
+fn drop_tiles_with_info(board: &mut Board) -> Vec<DropInfo> {
+    let mut drops = vec![];
+
+    for x in 0..WIDTH {
+        let mut column: Vec<(usize, u8)> = vec![];
+
+        // Сохраняем все не-пустые значения снизу вверх
+        for y in (0..HEIGHT).rev() {
+            if board[y][x] != 0 {
+                column.push((y, board[y][x]));
+            }
+        }
+
+        // Добавляем новые тайлы сверху
+        let mut rng = rand::thread_rng();
+        while column.len() < HEIGHT {
+            column.push((usize::MAX, rng.gen_range(1..=TILE_TYPES) as u8)); // usize::MAX - генерация новых тайтлов, можно цифру
+        }
+
+        // Перезаписываем колонку снизу вверх
+        for (offset, &(from_y, value)) in column.iter().enumerate() {
+            let to_y = HEIGHT - 1 - offset;
+            board[to_y][x] = value;
+
+            // Запоминаем перемещение (если было)
+            if from_y != to_y {
+                drops.push(DropInfo {
+                    from_x: x,
+                    from_y,
+                    to_x: x,
+                    to_y,
+                    value,
+                });
+            }
+        }
+    }
+
+    drops
+}
+
+/// Основная функция запуска Tauri-приложения
+fn main() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![generate_board, move_tile, activate_bonus_tile ]) // Экспорт функций
+        .run(tauri::generate_context!()) // Запуск
+        .expect("error while running tauri application"); // Обработка ошибки
+}
